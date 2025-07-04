@@ -2127,5 +2127,11 @@ def tunnelMain():
     common()
 
 
+def gui_main():
+    """Control meshtastic through a TK UI"""
+    from meshtastic import gui
+    gui.run_app()
+
+
 if __name__ == "__main__":
     main()

@@ -74,6 +74,7 @@ analysis = ["dash", "dash-bootstrap-components", "pandas", "pandas-stubs"]
 meshtastic = "meshtastic.__main__:main"
 mesh-tunnel = "meshtastic.__main__:tunnelMain [tunnel]"
 mesh-analysis = "meshtastic.analysis.__main__:main [analysis]"
+mesh-gui = "meshtastic.__main__:gui_main"
 
 # "Poe the poet" (optional) provides an easy way of running non python tools inside the poetry virtualenv
 # if you would like to use it run "pipx install poe"
