@@ -279,3 +279,12 @@ protocols = {
     portnums_pb2.PortNum.NEIGHBORINFO_APP: KnownProtocol("neighborinfo", mesh_pb2.NeighborInfo),
     portnums_pb2.PortNum.MAP_REPORT_APP: KnownProtocol("mapreport", mqtt_pb2.MapReport),
 }
+
+# convenience namespacing for library usage
+from meshtastic.supported_device import SupportedDevice, supported_devices
+from meshtastic.mesh_interface import MeshInterface
+from meshtastic.stream_interface import StreamInterface
+from meshtastic.serial_interface import SerialInterface
+from meshtastic.ble_interface import BLEInterface, BLEClient, BLEDevice
+from meshtastic.tcp_interface import TCPInterface
+from meshtastic.version import get_active_version
