@@ -19,11 +19,15 @@ class MeshtasticApplication(ttk.Frame):
         super().__init__(None)
         self.master.title("Meshtastic")
         #self.master.tk.call("wm", "group", )
+        self._init_widgets()
+
+
+    def _init_widgets(self):
+        self.ui_panes: ttk.PanedWindow = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         self.pack(expand=1)
-
-        self.dev_list: DeviceList = DeviceList(self)
-        self.dev_list.pack(fill="both", expand=1)
-
+        self.ui_panes.pack(fill=tk.BOTH, expand=1)
+        self.ui_panes.add(DeviceList(self), weight=1)
+        self.ui_panes.add(DevicePanel(self), weight=2)
 
 class DeviceList(ttk.LabelFrame):
     """A scrollable list of detected nodes over serial, BLE, and network"""
@@ -53,21 +57,79 @@ class DeviceList(ttk.LabelFrame):
         self.list.insert("", "end", text=device.getLongName(), values=(device, "Connected", ctype, addr))
 
 
+class LabeledWidget(ttk.Frame):
+    """A widget that is displayed next to a label"""
+
+    def __init__(self, parent, text=None, texvariable=None, value=None):
+        super().__init__(parent)
+        self.label: ttk.Label = ttk.Label(self, text=text, textvariable=textvariable)
+        self.value: tk.Widget
+        if isinstance(value, tk.Widget):
+            self.value = value
+        elif isinstance(value, tk.Variable):
+            self.value = ttk.Label(self, textvariable=value)
+
+    def pack(self, **kwargs):
+        super().pack(**kwargs)
+        self.label.pack(side="left", fill=tk.X, expand=1)
+        self.value.pack(side="right", fill=tk.X, expand=1)
+
+    def grid(self, **kwargs):
+        super().grid(**kwargs)
+        self.label.grid(column=0, row=0, sticky=(tk.N, tk.S, tk.E, tk.W))
+        self.value.grid(column=1, row=0, sticky=(tk.N, tk.S, tk.E, tk.W))
+        self.columnconfigure(0, weight=1)
+        self.columnconfigure(1, weight=1)
+
+
+class DevicePanel(ttk.Notebook):
+    """Contains information about a device interface"""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.device: Optional[MeshInterface] = None
+        self.tabs = meshtastic.util.dotdict()
+        self.make_tabs()
+        self.enable_traversal()
+
+    def make_tabs(self):
+        self.tabs.summary: DeviceSummary = DeviceSummary(self, self.device)
+        self.add(self.tabs.summary, text="Device Summary")
+
+    def set_device(self, device: MeshInterface):
+        self.device = device
+
+
+class DeviceSummary(ttk.Frame):
+    """Displays a summary of basic info about a device interface"""
+
+    def __init__(self, parent: tk.Widget, device: MeshInterface):
+        super().__init__(parent)
+        self.device: MeshInterface = device
+        #self.
+
+
 class CustomDialog(tk.Toplevel):
     """Convenience base class for custom dialog windows"""
-    def __init__(self, parent, title):
-        super().__init__()
+    def __init__(self, parent: tk.Tk, title: str, grab_input: bool=True):
+        super().__init__(parent)
         self.transient(parent)
         self.title(title)
+        self.wait_visibility()
+        self.grab_set()
 
+    def destroy(self):
+        self.grab_release()
+        super().destroy()
 
 class DeviceConnectDialog(CustomDialog):
     """User dialog to connect to a meshtastic device"""
 
-    def __init__(self, parent):
+    def __init__(self, parent: tk.Widget):
         super().__init__(parent, "Add Meshtastic Device")
         self.parent = parent
         self.device_ctype: tk.StringVar = tk.StringVar(value="serial")
+        self.device_ctype.trace_add("write", self.on_ctype_select)
         self.ctype_frame: ttk.LabelFrame = ttk.LabelFrame(self, text="Connection Interface")
         self.ctype_buttons: Tuple[ttk.Radiobutton] = (
             ttk.Radiobutton(self.ctype_frame, variable=self.device_ctype, value="serial", text="Serial/USB"),
@@ -77,7 +139,6 @@ class DeviceConnectDialog(CustomDialog):
         self.ctype_frame.pack(side="left", fill=tk.Y, expand=1)
         for button in self.ctype_buttons:
             button.pack(side="top", fill=tk.X, expand=0)
-            button.bind("<Button-1>", self.on_ctype_select)
 
         self.interface_frame: ttk.Frame = ttk.Frame(self)
         self.serial_interface_widget: SerialInterfaceWidget = self.SerialInterfaceWidget(self.interface_frame)
