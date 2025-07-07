@@ -1,26 +1,60 @@
+import asyncio
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox as tkmsg
+from threading import Thread
+from concurrent.futures import Future
 from typing import *
 
 import meshtastic
-from meshtastic.mesh_interface import MeshInterface
-from meshtastic.serial_interface import SerialInterface
-from meshtastic.ble_interface import BLEInterface
-from meshtastic.tcp_interface import TCPInterface
+from meshtastic import MeshInterface, SerialInterface, BLEInterface, TCPInterface
 
+from bleak import BleakScanner
 from pubsub import pub
+
+
+class AppIO:
+    """Singleton for managing application i/o thread."""
+    # so help me goddess python async is impossible
+    _io_thread: Thread
+    _io_loop: asyncio.EventLoop
+
+    @classmethod
+    def init_state(cls):
+        cls._io_thread = Thread(name="meshgui-io", target=cls._start_io_loop)
+        cls._io_loop = asyncio.new_event_loop()
+        cls._io_thread.start()
+
+    @classmethod
+    def _start_io_loop(cls):
+        try:
+            asyncio.set_event_loop(cls._io_loop)
+            cls._io_loop.run_forever()
+        finally:
+            cls._io_thread.join()
+
+    @classmethod
+    def run_io_task(cls, coro: Coroutine, cb: Optional[Callable]=None):
+        """Calls a coroutine in the application's designated IO thread"""
+        future: Future = asyncio.run_coroutine_threadsafe(coro, cls._io_loop)
+        if cb is not None:
+            future.add_done_callback(cb)
 
 
 class MeshtasticApplication(ttk.Frame):
     """Meshtastic main application window."""
 
     def __init__(self):
+        AppIO.init_state()
         super().__init__(None)
         self.master.title("Meshtastic")
         #self.master.tk.call("wm", "group", )
+        self.connections: dict[str, MeshInterface] = {}
         self._init_widgets()
+        pub.subscribe(self._on_interface_connect, "meshtastic.connection.established")
 
+    def _on_interface_connect(self, interface: MeshInterface):
+        self.connections[interface.getShortName()] = interface
 
     def _init_widgets(self):
         self.ui_panes: ttk.PanedWindow = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
@@ -141,29 +175,24 @@ class DeviceConnectDialog(CustomDialog):
             button.pack(side="top", fill=tk.X, expand=0)
 
         self.interface_frame: ttk.Frame = ttk.Frame(self)
-        self.serial_interface_widget: SerialInterfaceWidget = self.SerialInterfaceWidget(self.interface_frame)
-        self.ble_interface_widget: BLEInterfaceWidget = self.BLEInterfaceWidget(self.interface_frame)
-        self.tcp_interface_widget: TCPInterfaceWidget = self.TCPInterfaceWidget(self.interface_frame)
-        self.current_interface_widget: ttk.Frame = self.serial_interface_widget
+        self.current_interface_widget: ttk.Frame = self.SerialInterfaceWidget(self.interface_frame)
         self.connect_button = ttk.Button(self.interface_frame, text="Connect", command=self.do_connect)
         self.interface_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=1)
         self.connect_button.pack(side=tk.BOTTOM)
         self.current_interface_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=1)
-        self.current_interface_widget.on_active()
 
-    def on_ctype_select(self, event: tk.Event):
+    def on_ctype_select(self, *args):
         "Changes the dialog when the selected connection type changes"
-        self.current_interface_widget.pack_forget()
-        selection: str = event.widget["value"]
+        self.current_interface_widget.destroy()
+        selection: str = self.device_ctype.get()
         if selection == "serial":
-            self.current_interface_widget = self.serial_interface_widget
+            self.current_interface_widget = self.SerialInterfaceWidget(self.interface_frame)
         elif selection == "ble":
-            self.current_interface_widget = self.ble_interface_widget
+            self.current_interface_widget = self.BLEInterfaceWidget(self.interface_frame)
         elif selection == "tcp":
-            self.current_interface_widget = self.tcp_interface_widget
+            self.current_interface_widget = self.TCPInterfaceWidget(self.interface_frame)
 
         self.current_interface_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=1)
-        self.current_interface_widget.on_active()
 
     def do_connect(self):
         interface, addr = self.current_interface_widget.connect_device()
@@ -175,7 +204,7 @@ class DeviceConnectDialog(CustomDialog):
 
     class SerialInterfaceWidget(ttk.Frame):
         ctype: str = "Serial/USB"
-        def __init__(self, parent):
+        def __init__(self, parent: tk.Widget):
             super().__init__(parent)
             self.ports_list_scroll: ttk.Scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL)
             self.ports_list: ttk.Treeview = ttk.Treeview(
@@ -183,9 +212,9 @@ class DeviceConnectDialog(CustomDialog):
             )
             self.ports_list_scroll["command"] = self.ports_list.yview
             #self.ports_list.bind("<<TreeViewSelect>>", self.validate_selection)
+            self.ports_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+            self.ports_list_scroll.pack(side=tk.RIGHT, fill=tk.Y, expand=1)
 
-        def on_active(self):
-            print("Serial connection dialog active")
             print(f"Searching for any of VIDs: {meshtastic.util.get_unique_vendor_ids()}")
             self.ports_list.delete(*self.ports_list.get_children())
             devices = meshtastic.util.detect_supported_devices()
@@ -201,9 +230,6 @@ class DeviceConnectDialog(CustomDialog):
                 for port in meshtastic.util.findPorts(True):
                     self.ports_list.insert("", tk.END, text=port, tags=("port",))
 
-            self.ports_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
-            self.ports_list_scroll.pack(side=tk.RIGHT, fill=tk.Y, expand=1)
-
         def connect_device(self) -> Optional[MeshInterface]:
             selection: tuple[str] = self.ports_list.selection()
             if len(selection) == 1 and self.ports_list.tag_has("port", selection[0]):
@@ -214,9 +240,74 @@ class DeviceConnectDialog(CustomDialog):
             return None
 
     class BLEInterfaceWidget(ttk.Frame):
-        pass
+        ctype: str = "Bluetooth"
+        def __init__(self, parent: tk.Widget):
+            super().__init__(parent)
+            self.scan_state: tk.StringVar = tk.StringVar(value="scanning...")
+            self.progress: ttk.ProgressBar = ttk.Progressbar(self, mode="determinate")
+            self.progress_label: ttk.Label = ttk.Label(self, textvariable=self.scan_state)
+
+            self.devlist_scroll: ttk.Scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL)
+            # using treeview here because listview does not have ttk counterpart
+            self.devlist: ttk.Treeview = ttk.Treeview(
+                self, selectmode=tk.BROWSE, yscrollcommand=self.devlist_scroll.set,
+                columns=("rssi"), displaycolumns=("#all")
+            )
+            self.devlist_scroll["command"] = self.devlist.yview
+            self.devlist.heading("#0", text="Device")
+            self.devlist.heading("rssi", text="RSSI")
+
+            self.progress.pack(side=tk.TOP, fill=tk.X, expand=1, padx=5, pady=5)
+            self.progress_label.pack(side=tk.TOP, fill=tk.X, expand=1)
+            self.devlist.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+            self.devlist_scroll.pack(side=tk.RIGHT, fill=tk.Y, expand=1)
+
+            self.devices: dict[str, str] = {}
+            AppIO.run_io_task(self._scan_devices(), self._on_scan_complete)
+            self.progress.start(10)
+
+        async def _scan_devices(self):
+            print("starting bt scan")
+            uuid: str = meshtastic.ble_interface.SERVICE_UUID
+            async with BleakScanner(self._on_device_found, service_uuids=[uuid]) as scanner:
+                await asyncio.sleep(100)
+                print("finished bt scan")
+
+        # TODO: type annotations ommitted for now because bleak has horrid namespacing
+        def _on_device_found(self, device, data):
+            iid: str = self.devlist.insert("", tk.END, text=device.name, values=(data.rssi,))
+            self.devices[iid] = device.address
+
+        def _on_scan_complete(self, _: Any):
+            self.scan_state.set("Scan Complete")
+            self.progress.pack_forget()
+
+        def connect_device(self) -> Optional[MeshInterface]:
+            selection: tuple[str] = self.devlist.selection()
+            if len(devlist) == 1:
+                addr: str = self.devices[selection[0]]
+                return BLEInterface(address=addr)
+
+            return None
 
     class TCPInterfaceWidget(ttk.Frame):
         ctype: str = "TCP Link"
-        def __init__(self, parent):
-            pass
+        def __init__(self, parent: tk.Widget):
+            super().__init__(parent)
+            self.host: tk.StringVar = tk.StringVar(value="localhost")
+            self.port: tk.IntVar = tk.IntVar(value=4403)
+
+            self.host_label: ttk.Label = ttk.Label(self, text="Address")
+            self.host_entry: ttk.Entry = ttk.Entry(self, textvariable=self.host)
+            self.port_label: ttk.Label = ttk.Label(self, text="Port")
+            self.port_entry: ttk.Entry = ttk.Entry(self, textvariable=self.port)
+
+            for widget in (self.host_label, self.host_entry, self.port_label, self.port_entry):
+                widget.pack(side=tk.TOP, fill=tk.X, expand=True, ipadx=5)
+
+        def connect_device(self) -> Optional[MeshInterface]:
+            try:
+                interface: TCPInterface = TCPInterface(host, portNumber=port)
+                return interface
+            except Exception:  # unsure what would actually get thrown here; python socket docs are unclear
+                return None
